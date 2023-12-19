@@ -29,7 +29,8 @@ module System.Posix.Directory.PosixPath (
    -- * Reading directories
    DirStream,
    openDirStream,
-   readDirStream,
+   readDirStream, readDirStream2, readDirStream3, readDirStream4, readDirStream5,
+   PosixFile(PosixFile), FileType(..),
    rewindDirStream,
    closeDirStream,
    DirStreamOffset,
@@ -55,6 +56,13 @@ import System.Posix.Directory hiding (createDirectory, openDirStream, readDirStr
 import qualified System.Posix.Directory.Common as Common
 import System.Posix.PosixPath.FilePath
 
+
+-- new
+import Data.ByteString.Short
+import Data.Coerce
+import System.OsString.Internal.Types
+
+
 -- | @createDirectory dir mode@ calls @mkdir@ to
 --   create a new directory, @dir@, with permissions based on
 --  @mode@.
@@ -71,7 +79,7 @@ foreign import ccall unsafe "mkdir"
 -- | @openDirStream dir@ calls @opendir@ to obtain a
 --   directory stream for @dir@.
 openDirStream :: PosixPath -> IO DirStream
-openDirStream name =
+openDirStream name = do
   withFilePath name $ \s -> do
     dirp <- throwErrnoPathIfNullRetry "openDirStream" name $ c_opendir s
     return (Common.DirStream dirp)
@@ -104,9 +112,120 @@ readDirStream (Common.DirStream dirp) = alloca $ \ptr_dEnt  -> loop ptr_dEnt
                     then return mempty
                     else throwErrno "readDirStream"
 
+
+d_type_FileType :: CUChar -> FileType
+d_type_FileType cuchar = case cuchar of
+  4 -> Dir
+  8 -> Reg
+  0 -> Unknown
+  1 -> Fifo
+  2 -> Chr
+  6 -> Blk
+  10 -> Lnk
+  12 -> Sock
+  14 -> Wht
+  _ -> error "impossible"
+
+data FileType = Unknown | Fifo | Chr | Dir | Blk | Reg | Lnk | Sock | Wht
+  deriving (Eq, Ord, Show, Enum)
+
+data PosixFile = PosixFile !PosixPath {-# UNPACK #-} !FileType
+  deriving Show
+
+readDirStream2 :: DirStream -> IO (Maybe PosixFile)
+readDirStream2 (Common.DirStream dirp) = alloca $ \ptr_dEnt  -> loop ptr_dEnt
+ where
+  loop :: Ptr (Ptr Common.CDirent) -> IO (Maybe PosixFile)
+  loop ptr_dEnt = do
+    resetErrno
+    r <- c_readdir dirp ptr_dEnt
+    if (r == 0)
+         then do dEnt <- peek ptr_dEnt
+                 if (dEnt == nullPtr)
+                    then return Nothing
+                    else do
+                     entry <- (d_name dEnt >>= peekFilePath)
+                     type_ <- d_type_FileType <$> d_type dEnt
+                     c_freeDirEnt dEnt
+                     return (Just (PosixFile entry type_))
+         else do errno <- getErrno
+                 if (errno == eINTR) then loop ptr_dEnt else do
+                 let (Errno eo) = errno
+                 if (eo == 0)
+                    then return Nothing
+                    else throwErrno "readDirStream"
+
+instance Storable PosixFile where
+  sizeOf _ = #{size struct dirent}
+  alignment _ = #{alignment struct dirent}
+  peek ptr = PosixFile
+    <$> peekFilePath (plusPtr ptr #{offset struct dirent, d_name})
+    <*> (d_type_FileType <$> #{peek struct dirent, d_type} ptr)
+  poke _ = error "Storable PosixFile undefined"
+
+readDirStream3 :: DirStream -> IO (Maybe PosixFile)
+readDirStream3 (Common.DirStream dirp) = alloca $ \ptr_dEnt  -> loop ptr_dEnt
+ where
+  loop :: Ptr (Ptr Common.CDirent) -> IO (Maybe PosixFile)
+  loop ptr_dEnt = do
+    resetErrno
+    r <- c_readdir dirp ptr_dEnt
+    if (r == 0)
+         then do dEnt <- peek ptr_dEnt
+                 if (dEnt == nullPtr)
+                    then return Nothing
+                    else do
+                     entry <- peek (castPtr dEnt :: Ptr PosixFile)
+                     c_freeDirEnt dEnt
+                     return (Just entry)
+         else do errno <- getErrno
+                 if (errno == eINTR) then loop ptr_dEnt else do
+                 let (Errno eo) = errno
+                 if (eo == 0)
+                    then return Nothing
+                    else throwErrno "readDirStream"
+
+readDirStream4 :: DirStream -> IO [PosixFile]
+readDirStream4 (Common.DirStream dirp) = alloca $ \ptr_dEnt  -> loop ptr_dEnt id
+  where
+  loop :: Ptr (Ptr Common.CDirent) -> ([PosixFile] -> [PosixFile]) -> IO [PosixFile]
+  loop ptr_dEnt acc = do
+    resetErrno
+    r <- c_readdir dirp ptr_dEnt
+    if (r == 0)
+      then do
+        dEnt <- peek ptr_dEnt
+        if (dEnt == nullPtr)
+          then return (acc [])
+          else do
+            entry <- peek (castPtr dEnt :: Ptr PosixFile)
+            -- c_freeDirEnt dEnt -- this required?
+            loop ptr_dEnt (acc . (entry :))
+      else do
+        errno <- getErrno
+        if (errno == eINTR)
+          then loop ptr_dEnt acc
+          else case errno of
+            Errno eo -> if (eo == 0)
+              then return (acc [])
+              else throwErrno "readDirStream4"
+
+readDirStream5 :: DirStream -> IO [PosixFile]
+readDirStream5 (Common.DirStream dirp) = loop id
+  where
+  loop :: ([PosixFile] -> [PosixFile]) -> IO [PosixFile]
+  loop acc = do
+    resetErrno
+    dEnt <- c_readdir_direct dirp
+    if (dEnt == nullPtr)
+      then return (acc [])
+      else do
+        entry <- peek dEnt
+        loop (acc . (entry :))
+
 -- traversing directories
 foreign import ccall unsafe "__hscore_readdir"
-  c_readdir  :: Ptr Common.CDir -> Ptr (Ptr Common.CDirent) -> IO CInt
+  c_readdir :: Ptr Common.CDir -> Ptr (Ptr Common.CDirent) -> IO CInt
 
 foreign import ccall unsafe "__hscore_free_dirent"
   c_freeDirEnt  :: Ptr Common.CDirent -> IO ()
@@ -114,6 +233,12 @@ foreign import ccall unsafe "__hscore_free_dirent"
 foreign import ccall unsafe "__hscore_d_name"
   d_name :: Ptr Common.CDirent -> IO CString
 
+-- new
+foreign import ccall unsafe "__hscore_d_type"
+  d_type :: Ptr Common.CDirent -> IO CUChar
+
+foreign import ccall unsafe "readdir"
+  c_readdir_direct :: Ptr Common.CDir -> IO (Ptr PosixFile)
 
 -- | @getWorkingDirectory@ calls @getcwd@ to obtain the name
 --   of the current working directory.

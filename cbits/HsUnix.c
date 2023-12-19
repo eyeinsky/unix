@@ -95,6 +95,11 @@ char *__hscore_d_name( struct dirent* d )
   return (d->d_name);
 }
 
+int __hscore_d_type( struct dirent* d )
+{
+  return (d->d_type);
+}
+
 void __hscore_free_dirent(struct dirent *dEnt)
 {
 #if HAVE_READDIR_R && USE_READDIR_R
