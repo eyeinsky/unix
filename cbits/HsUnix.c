@@ -60,9 +60,6 @@ int __hscore_readdir( DIR *dirPtr, struct dirent **pDirEnt )
   int res;
   static unsigned int nm_max = (unsigned int)-1;
 
-  if (pDirEnt == NULL) {
-    return -1;
-  }
   if (nm_max == (unsigned int)-1) {
 #ifdef NAME_MAX
     nm_max = NAME_MAX + 1;
@@ -85,10 +82,6 @@ int __hscore_readdir( DIR *dirPtr, struct dirent **pDirEnt )
   }
   return res;
 #else
-
-  if (pDirEnt == NULL) {
-    return -1;
-  }
 
   *pDirEnt = readdir(dirPtr);
   if (*pDirEnt == NULL) {
